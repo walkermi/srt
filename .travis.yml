@@ -9,17 +9,29 @@ addons:
         - cmake
         - libssl-dev
         - build-essential
+    sonarcloud:
+        organization: "haivision"
+        token:
+            secure: "MehZwBPkVL8Fp856VQiVa0Ao9srTCGAsR1iCSZKgK2/HFbB2tEYyjbd0C0UiNVl4BZZ4BL7AednBC5Jnu82hy0F4Bv0TlzH6H+CM6VJ6K9UFgU8EPtQhwzIRQNA2zQ2NYHcWvu83+Cs5U7tA7bBepygs7hZSpVd4+hRsHl1imhixgVMWuKWknNTficLi7YHSdrG8u8PgYQ5/ihsFgOR35iokD+JOt6s9tArXgn8kXaxpugjEQzI7AuRqlfPMpy+g8zQEs0j0qRrvp3lUIPxqsbUeCpuGFforvdeqwLY0orTVtISKGpimbzD/PG9XpI7MXiBiy8qMiXJ0UxyDKyup9s9HrPN0Hy8uwM+mgmoYS9hs8RKXcEpIqO4Xiqq0Mkt/MYclozhKMu18hY9O1uDLTWMWIKrQucYXC5Rtn3uD01n6oxRd9vieXi8UvglkvptGa92fM6Uhe92mFDL+C5LYoxBSc3vplSMJXGNwLhBDJO4Syl2nfdS4mWmbPuxbrbvB7vEqBEC8MkYwf87eZfhII6Y9EKEvtIwvLcuHAfE1ebDovQe0VtYOgSZEQIOkdHURYXlu7RCF0SbL8UUhA+FiajLowQnR4sh+UFHg1JNfEfbZXFIx9S1+ld4XFV0+VkcAw2EWGHEmLcohqhDUBFxMPhmGP4hOsyaXLS9L8Ysnows="
     homebrew:
         packages:
         - openssl
 
 matrix:
     include:
-        - env: BUILD_TYPE=Debug
+        - os: linux
+          env:
+          - BUILD_TYPE=Debug
+          - BUILD_OPTS=-DENABLE_CODE_COVERAGE=ON
+          - RUN_SONARCUBE=(("$TRAVIS_REPO_SLUG" == "Haivisio/srt" ? 1 : 0))
+          after_success:
+          - if (( $RUN_SONARCUBE )); then source ./scripts/collect-gcov.sh; fi
+          - if (( $RUN_SONARCUBE )); then sonar-scanner -D"sonar.cfamily.gcov.reportPath=."; fi
         - env:
           - BUILD_TYPE=Debug
           - BUILD_OPTS=-DENABLE_LOGGING=OFF
-        - env: BUILD_TYPE=Release
+        - os: linux
+          env: BUILD_TYPE=Release
         - os: osx
           osx_image: xcode10.2
           env: BUILD_TYPE=Debug
@@ -54,5 +66,9 @@ script:
         export PKG_CONFIG_PATH=$(brew --prefix openssl)"/lib/pkgconfig";
         cmake . -DCMAKE_BUILD_TYPE=$BUILD_TYPE $BUILD_OPTS -DENABLE_UNITTESTS="ON";
       fi
-    - make
+    - if (( $RUN_SONARCUBE )); then
+        build-wrapper-linux-x86-64 --out-dir bw-output make;
+      else
+        make;
+      fi
     - if [ "$TRAVIS_COMPILER" != "x86_64-w64-mingw32-g++" ]; then ctest --extra-verbose; fi
