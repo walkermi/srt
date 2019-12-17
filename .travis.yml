@@ -24,9 +24,6 @@ matrix:
           - BUILD_TYPE=Debug
           - BUILD_OPTS=-DENABLE_CODE_COVERAGE=ON
           - RUN_SONARCUBE=1
-          after_success:
-          - if (( $RUN_SONARCUBE )); then source ./scripts/collect-gcov.sh; fi
-          - if (( $RUN_SONARCUBE )); then sonar-scanner -D"sonar.cfamily.gcov.reportPath=."; fi
         - env:
           - BUILD_TYPE=Debug
           - BUILD_OPTS=-DENABLE_LOGGING=OFF
@@ -72,9 +69,11 @@ script:
         export RUN_SONARCUBE=0;
       fi
     - echo "RUN_SONARCUBE=$RUN_SONARCUBE"
-    - if (( $RUN_SONARCUBE )); then
+    - if (( "$RUN_SONARCUBE" )); then
         build-wrapper-linux-x86-64 --out-dir bw-output make;
       else
         make;
       fi
     - if [ "$TRAVIS_COMPILER" != "x86_64-w64-mingw32-g++" ]; then ctest --extra-verbose; fi
+    - if (( "$RUN_SONARCUBE" )); then source ./scripts/collect-gcov.sh; fi
+    - if (( "$RUN_SONARCUBE" )); then sonar-scanner -D"sonar.cfamily.gcov.reportPath=."; fi
