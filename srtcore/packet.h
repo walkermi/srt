@@ -174,11 +174,14 @@ typedef Bits<26, 0> MSGNO_SEQ_OLD;
 // The message should be extracted as PMASK_MSGNO_SEQ, if REXMIT is supported, and PMASK_MSGNO_SEQ_OLD otherwise.
 
 const uint32_t PACKET_SND_NORMAL = 0, PACKET_SND_REXMIT = MSGNO_REXMIT::mask;
+const int MSGNO_SEQ_MAX = MSGNO_SEQ::mask;
 
 #else
 // Old bit breakdown - no rexmit flag
 typedef Bits<26, 0> MSGNO_SEQ;
 #endif
+
+typedef RollNumber<MSGNO_SEQ::size-1, 1> MsgNo;
 
 
 // constexpr in C++11 !
@@ -244,7 +247,7 @@ public:
       /// @param rparam [in] pointer to the second data structure, explained by the packet type.
       /// @param size [in] size of rparam, in number of bytes;
 
-   void pack(UDTMessageType pkttype, const void* lparam = NULL, void* rparam = NULL, int size = 0);
+   void pack(UDTMessageType pkttype, const int32_t* lparam = NULL, void* rparam = NULL, int size = 0);
 
       /// Read the packet vector.
       /// @return Pointer to the packet vector.
@@ -393,6 +396,10 @@ public:
    int32_t& m_iID;                      // alias: socket ID
    char*& m_pcData;                     // alias: data/control information
 
+   // Experimental: sometimes these references don't work!
+   char* getData();
+   char* release();
+
    //static const int m_iPktHdrSize;	// packet header size
    static const size_t HDR_SIZE = sizeof(HEADER_TYPE); // packet header size = SRT_PH__SIZE * sizeof(uint32_t)
 
@@ -414,13 +421,13 @@ public:
    size_t size() const { return getLength(); }
    uint32_t header(SrtPktHeaderFields field) const { return m_nHeader[field]; }
 
-   std::string MessageFlagStr()
 #if ENABLE_LOGGING
-   { return PacketMessageFlagStr(m_nHeader[SRT_PH_MSGNO]); }
+   std::string MessageFlagStr() { return PacketMessageFlagStr(m_nHeader[SRT_PH_MSGNO]); }
+   std::string Info();
 #else
-   { return ""; }
+   std::string MessageFlagStr() { return std::string(); }
+   std::string Info() { return std::string(); }
 #endif
 };
-
 
 #endif

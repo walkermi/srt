@@ -28,6 +28,7 @@ set_if(LINUX       ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 set_if(BSD         ${SYSNAME_LC} MATCHES "bsd$")
 set_if(MICROSOFT   WIN32 AND (NOT MINGW AND NOT CYGWIN))
 set_if(GNU         ${CMAKE_SYSTEM_NAME} MATCHES "GNU")
+set_if(POSIX       LINUX OR DARWIN OR BSD OR (CYGWIN AND CYGWIN_USE_POSIX))
 set_if(SYMLINKABLE LINUX OR DARWIN OR BSD OR CYGWIN OR GNU)
 
 # Not sure what to do in case of compiling by MSVC.
@@ -95,6 +96,7 @@ endif()
 option(CYGWIN_USE_POSIX "Should the POSIX API be used for cygwin. Ignored if the system isn't cygwin." OFF)
 option(ENABLE_CXX11 "Should the c++11 parts (srt-live-transmit) be enabled" ON)
 option(ENABLE_APPS "Should the Support Applications be Built?" ON)
+option(ENABLE_TESTING "Should the Developer Test Applications be Built?" OFF)
 option(ENABLE_PROFILE "Should instrument the code for profiling. Ignored for non-GNU compiler." $ENV{HAI_BUILD_PROFILE})
 option(ENABLE_LOGGING "Should logging be enabled" ON)
 option(ENABLE_HEAVY_LOGGING "Should heavy debug logging be enabled" ${ENABLE_HEAVY_LOGGING_DEFAULT})
@@ -116,6 +118,10 @@ option(USE_BUSY_WAITING "Enable more accurate sending times at a cost of potenti
 option(USE_GNUSTL "Get c++ library/headers from the gnustl.pc" OFF)
 
 set(TARGET_srt "srt" CACHE STRING "The name for the SRT library")
+
+# Use application-defined group reader
+# (currently the only one implemented)
+add_definitions(-DSRT_ENABLE_APP_READER)
 
 if (NOT ENABLE_LOGGING)
 	set (ENABLE_HEAVY_LOGGING OFF)
@@ -160,27 +166,42 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-# Handle WITH_COMPILER_PREFIX and WITH_COMPILER_TYPE options
-if (DEFINED WITH_COMPILER_PREFIX)
-	message(STATUS "Handling compiler with WITH_COMPILER_PREFIX=${WITH_COMPILER_PREFIX}")
-	# Check also type. Default is gcc.
-	if (NOT DEFINED WITH_COMPILER_TYPE)
-		set (WITH_COMPILER_TYPE gcc)
-	endif()
+if (NOT DEFINED WITH_COMPILER_TYPE)
 
-	if (${WITH_COMPILER_TYPE} STREQUAL gcc)
-		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}gcc)
-		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}g++)
-	elseif (${WITH_COMPILER_TYPE} STREQUAL cc)
-		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}cc)
-		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}c++)
+	# This is for a case when you provided the prefix, but you didn't
+	# provide compiler type. This option is in this form predicted to work
+	# only on POSIX systems. Just typical compilers for Linux and Mac are
+	# included. 
+	if (DARWIN)
+		set (WITH_COMPILER_TYPE clang)
+	elseif (POSIX) # Posix, but not DARWIN
+		set(WITH_COMPILER_TYPE gcc)
+	else()
+		get_filename_component(WITH_COMPILER_TYPE ${CMAKE_C_COMPILER} NAME)
+	endif()
+	set (USING_DEFAULT_COMPILER_PREFIX 1)
+endif()
+
+if (NOT USING_DEFAULT_COMPILER_PREFIX OR DEFINED WITH_COMPILER_PREFIX)
+	message(STATUS "Handling compiler with PREFIX=${WITH_COMPILER_PREFIX} TYPE=${WITH_COMPILER_TYPE}")
+
+	parse_compiler_type(${WITH_COMPILER_TYPE} COMPILER_TYPE COMPILER_SUFFIX)
+
+	if (${COMPILER_TYPE} STREQUAL gcc)
+		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}gcc${COMPILER_SUFFIX})
+		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}g++${COMPILER_SUFFIX})
+	elseif (${COMPILER_TYPE} STREQUAL cc)
+		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}cc${COMPILER_SUFFIX})
+		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}c++${COMPILER_SUFFIX})
+	elseif (${COMPILER_TYPE} STREQUAL icc)
+		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}icc${COMPILER_SUFFIX})
+		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}icpc${COMPILER_SUFFIX})
 	else()
 		# Use blindly <command> for C compiler and <command>++ for C++.
 		# At least this matches clang.
 		set (CMAKE_C_COMPILER ${WITH_COMPILER_PREFIX}${WITH_COMPILER_TYPE})
-		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}${WITH_COMPILER_TYPE}++)
+		set (CMAKE_CXX_COMPILER ${WITH_COMPILER_PREFIX}${COMPILER_TYPE}++${COMPILER_SUFFIX})
 	endif()
-
 	message(STATUS "Compiler type: ${WITH_COMPILER_TYPE}. C: ${CMAKE_C_COMPILER}; C++: ${CMAKE_CXX_COMPILER}")
 else()
 	message(STATUS "No WITH_COMPILER_PREFIX - using C++ compiler ${CMAKE_CXX_COMPILER}")
@@ -358,8 +379,6 @@ endif()
 set (srt_libspec_shared ${ENABLE_SHARED})
 set (srt_libspec_static ${ENABLE_STATIC})
 
-set (haicrypt_libspec VIRTUAL)
-
 set (srtpack_libspec_common)
 if (srt_libspec_shared)
 	list(APPEND srtpack_libspec_common ${TARGET_srt}_shared)
@@ -387,6 +406,10 @@ elseif(BSD)
 elseif(LINUX)
 	add_definitions(-DLINUX=1)
 	message(STATUS "DETECTED SYSTEM: LINUX;  LINUX=1" )
+elseif(ANDROID)
+	add_definitions(-DLINUX=1)
+	add_definitions(-DANDROID=1)
+	message(STATUS "DETECTED SYSTEM: ANDROID;  LINUX=1 ANDROID=1" )
 elseif(CYGWIN)
 	add_definitions(-DCYGWIN=1)
 	message(STATUS "DETECTED SYSTEM: CYGWIN (posix mode); CYGWIN=1")
@@ -559,8 +582,6 @@ endif()
 # so consider adding at least one real source file to any target that references $<TARGET_OBJECTS:objlib>.
 set(OBJECT_LIB_SUPPORT "${PROJECT_SOURCE_DIR}/cmake_object_lib_support.c")
 
-add_library(haicrypt_virtual OBJECT ${SOURCES_haicrypt} ${SOURCES_common})
-
 # NOTE: The "virtual library" is a library specification that cmake
 # doesn't support (the library of OBJECT type is something in kind of that,
 # but not fully supported - for example it doesn't support transitive flags,
@@ -592,13 +613,11 @@ configure_file("srtcore/version.h.in" "version.h" @ONLY)
 list(INSERT HEADERS_srt 0 "${CMAKE_CURRENT_BINARY_DIR}/version.h")
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-add_library(srt_virtual OBJECT ${SOURCES_srt} ${SOURCES_srt_extra} ${HEADERS_srt})
+add_library(srt_virtual OBJECT ${SOURCES_srt} ${SOURCES_srt_extra} ${HEADERS_srt} ${SOURCES_haicrypt} ${SOURCES_common})
 
 if (ENABLE_SHARED)
 	# Set this to sources as well, as it won't be automatically handled
-	foreach (tar srt_virtual haicrypt_virtual)
-		set_target_properties(${tar} PROPERTIES POSITION_INDEPENDENT_CODE 1)
-	endforeach()
+	set_target_properties(srt_virtual PROPERTIES POSITION_INDEPENDENT_CODE 1)
 
 	#add resource files to shared library, to set DLL metadata on Windows DLLs
 	if (MICROSOFT)
@@ -610,11 +629,7 @@ if (ENABLE_SHARED)
 	endif()
 endif()
 
-# Manual handling of dependency on virtual library
-# By setting the target, all settings applied to the haicrypt target
-# will now apply to the dependent library.
-#list(APPEND SOURCES_srt ${SOURCES_haicrypt})
-set (VIRTUAL_srt $<TARGET_OBJECTS:srt_virtual> $<TARGET_OBJECTS:haicrypt_virtual>)
+set (VIRTUAL_srt $<TARGET_OBJECTS:srt_virtual>)
 
 if (srt_libspec_shared)
 	add_library(${TARGET_srt}_shared SHARED ${OBJECT_LIB_SUPPORT} ${VIRTUAL_srt} ${SOURCES_srt_shared_win32} ${HEADERS_srt_shared_win32})
@@ -670,29 +685,13 @@ if (srt_libspec_static)
 	endif()
 endif()
 
-
-
-# ---
-# And back to target: haicrypt. Both targets must be defined
-# prior to setting flags, and after defining the list of sources
-# can no longer be extended.
-#
-# For haicrypt.spec = VIRTUAL, these settings apply to srt.
-# Otherwise they apply to haicrypt.
-# ---
-
-
-target_include_directories(haicrypt_virtual PRIVATE  ${SSL_INCLUDE_DIRS})
+target_include_directories(srt_virtual PRIVATE  ${SSL_INCLUDE_DIRS})
 
 if (MICROSOFT)
 	set (SRT_LIBS_PRIVATE ${SRT_LIBS_PRIVATE} ws2_32.lib)
 elseif (MINGW)
 	set (SRT_LIBS_PRIVATE ${SRT_LIBS_PRIVATE} -lwsock32 -lws2_32)
 endif()
-
-# ---
-# So, back to target: srt. Setting the rest of the settings for srt target.
-# ---
 
 # Applying this to public includes is not transitive enough.
 # On Windows, apps require this as well, so it's safer to
@@ -714,10 +713,8 @@ endforeach()
 set (SRT_LIBS_PRIVATE ${SRT_LIBS_PRIVATE} ${PTHREAD_LIBRARY})
 
 target_compile_definitions(srt_virtual PRIVATE -DSRT_EXPORTS )
-target_compile_definitions(haicrypt_virtual PUBLIC -DHAICRYPT_DYNAMIC)
 if (ENABLE_SHARED)
-	target_compile_definitions(srt_virtual PUBLIC -DSRT_DYNAMIC) 
-	target_compile_definitions(haicrypt_virtual PRIVATE -DHAICRYPT_EXPORTS)
+	target_compile_definitions(srt_virtual PUBLIC -DSRT_DYNAMIC)
 endif()
 
 if (srt_libspec_shared)
@@ -867,6 +864,8 @@ endif()
 
 if (ENABLE_APPS)
 
+	message(STATUS "APPS: ENABLED")
+
 	# Make a virtual library of all shared app files
 	MafReadDir(apps support.maf
 		SOURCES SOURCES_support
@@ -900,6 +899,7 @@ if (ENABLE_APPS)
 	endif()
 
 	if (ENABLE_TESTING)
+		message(STATUS "DEVEL APPS (testing): ENABLED")
 
 		macro(srt_add_testprogram name)
 			# Variables in macros are not local. Clear them forcefully.
@@ -936,8 +936,17 @@ if (ENABLE_APPS)
 
 		srt_add_testprogram(srt-test-multiplex)
 		srt_make_application(srt-test-multiplex)
+
+		srt_add_testprogram(srt-test-mpbond)
+		srt_make_application(srt-test-mpbond)
+
+	else()
+		message(STATUS "DEVEL APPS (testing): DISABLED")
 	endif()
 
+
+else()
+	message(STATUS "APPS: DISABLED")
 endif()
 
 if (ENABLE_EXAMPLES)
@@ -962,6 +971,12 @@ if (ENABLE_EXAMPLES)
 
 	srt_add_example(test-c-server.c)
 	srt_make_application(test-c-server)
+
+	srt_add_example(test-c-client-bonding.c)
+	srt_make_application(test-c-client-bonding)
+
+	srt_add_example(test-c-server-bonding.c)
+	srt_make_application(test-c-server-bonding)
 
 	srt_add_example(testcapi-connect.c)
 	target_link_libraries(testcapi-connect ${srt_link_library} ${DEPENDS_srt})

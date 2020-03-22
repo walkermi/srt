@@ -51,7 +51,12 @@ written by
 // LOGC uses an iostream-like syntax, using the special 'log' symbol.
 // This symbol isn't visible outside the log macro parameters.
 // Usage: LOGC(mglog.Debug, log << param1 << param2 << param3);
-#define LOGC(logdes, args) if (logdes.CheckEnabled()) { srt_logging::LogDispatcher::Proxy log(logdes); log.setloc(__FILE__, __LINE__, __FUNCTION__); args; }
+#define LOGC(logdes, args) if (logdes.CheckEnabled()) \
+{ \
+    srt_logging::LogDispatcher::Proxy log(logdes); \
+    log.setloc(__FILE__, __LINE__, __FUNCTION__); \
+    const srt_logging::LogDispatcher::Proxy& log_prox SRT_ATR_UNUSED = args; \
+}
 
 // LOGF uses printf-like style formatting.
 // Usage: LOGF(mglog.Debug, "%s: %d", param1.c_str(), int(param2));
@@ -104,7 +109,7 @@ struct LogConfig
     std::ostream* log_stream;
     SRT_LOG_HANDLER_FN* loghandler_fn;
     void* loghandler_opaque;
-    pthread_mutex_t mutex;
+    srt::sync::Mutex mutex;
     int flags;
 
     LogConfig(const fa_bitset_t& efa,
@@ -117,16 +122,14 @@ struct LogConfig
         , loghandler_opaque()
         , flags()
     {
-        pthread_mutex_init(&mutex, NULL);
     }
 
     ~LogConfig()
     {
-        pthread_mutex_destroy(&mutex);
     }
 
-    void lock() { pthread_mutex_lock(&mutex); }
-    void unlock() { pthread_mutex_unlock(&mutex); }
+    void lock() { mutex.lock(); }
+    void unlock() { mutex.unlock(); }
 };
 
 // The LogDispatcher class represents the object that is responsible for
@@ -139,7 +142,6 @@ private:
     static const size_t MAX_PREFIX_SIZE = 32;
     char prefix[MAX_PREFIX_SIZE+1];
     LogConfig* src_config;
-    pthread_mutex_t mutex;
 
     bool isset(int flg) { return (src_config->flags & flg) != 0; }
 
@@ -166,12 +168,10 @@ public:
             strcat(prefix, ":");
             strcat(prefix, logger_pfx);
         }
-        pthread_mutex_init(&mutex, 0);
     }
 
     ~LogDispatcher()
     {
-        pthread_mutex_destroy(&mutex);
     }
 
     bool CheckEnabled();

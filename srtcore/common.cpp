@@ -58,9 +58,10 @@ modified by
 #include <cmath>
 #include <iostream>
 #include <iomanip>
-#include "srt.h"
+#include "udt.h"
 #include "md5.h"
 #include "common.h"
+#include "netinet_any.h"
 #include "logging.h"
 #include "threadname.h"
 
@@ -69,240 +70,22 @@ modified by
 using namespace srt::sync;
 
 
-pthread_mutex_t CTimer::m_EventLock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t CTimer::m_EventCond = PTHREAD_COND_INITIALIZER;
-
-CTimer::CTimer():
-m_tsSchedTime(),
-m_TickCond(),
-m_TickLock()
-{
-    pthread_mutex_init(&m_TickLock, NULL);
-
-#if ENABLE_MONOTONIC_CLOCK
-    pthread_condattr_t  CondAttribs;
-    pthread_condattr_init(&CondAttribs);
-    pthread_condattr_setclock(&CondAttribs, CLOCK_MONOTONIC);
-    pthread_cond_init(&m_TickCond, &CondAttribs);
-#else
-    pthread_cond_init(&m_TickCond, NULL);
-#endif
-}
-
-CTimer::~CTimer()
-{
-    pthread_mutex_destroy(&m_TickLock);
-    pthread_cond_destroy(&m_TickCond);
-}
-
-void CTimer::sleepto(const srt::sync::steady_clock::time_point &nexttime)
-{
-   // Use class member such that the method can be interrupted by others
-   m_tsSchedTime = nexttime;
-
-   steady_clock::time_point t = steady_clock::now();
-
-#if USE_BUSY_WAITING
-#if defined(_WIN32)
-    const uint64_t threshold_us = 10000;   // 10 ms on Windows: bad accuracy of timers
-#else
-    const uint64_t threshold_us = 1000;    // 1 ms on non-Windows platforms
-#endif
-#endif // USE_BUSY_WAITING
-
-    while (t < m_tsSchedTime)
-    {
-#if USE_BUSY_WAITING
-        uint64_t wait_us = count_microseconds(m_tsSchedTime - t);
-        if (wait_us <= 2 * threshold_us)
-            break;
-        wait_us -= threshold_us;
-#else
-        const uint64_t wait_us = count_microseconds(m_tsSchedTime - t);
-        if (wait_us == 0)
-            break;
-#endif // USE_BUSY_WAITING
-
-        timespec timeout;
-#if ENABLE_MONOTONIC_CLOCK
-        clock_gettime(CLOCK_MONOTONIC, &timeout);
-        const uint64_t time_us = timeout.tv_sec * uint64_t(1000000) + (timeout.tv_nsec / 1000) + wait_us;
-        timeout.tv_sec = time_us / 1000000;
-        timeout.tv_nsec = (time_us % 1000000) * 1000;
-#else
-        timeval now;
-        gettimeofday(&now, 0);
-        const uint64_t time_us = now.tv_sec * uint64_t(1000000) + now.tv_usec + wait_us;
-        timeout.tv_sec = time_us / 1000000;
-        timeout.tv_nsec = (time_us % 1000000) * 1000;
-#endif // ENABLE_MONOTONIC_CLOCK
-
-        THREAD_PAUSED();
-        pthread_mutex_lock(&m_TickLock);
-        pthread_cond_timedwait(&m_TickCond, &m_TickLock, &timeout);
-        pthread_mutex_unlock(&m_TickLock);
-        THREAD_RESUMED();
-
-        t = steady_clock::now();
-    }
-
-#if USE_BUSY_WAITING
-    while (t < m_tsSchedTime)
-    {
-#ifdef IA32
-        __asm__ volatile ("pause; rep; nop; nop; nop; nop; nop;");
-#elif IA64
-        __asm__ volatile ("nop 0; nop 0; nop 0; nop 0; nop 0;");
-#elif AMD64
-        __asm__ volatile ("nop; nop; nop; nop; nop;");
-#elif defined(_WIN32) && !defined(__MINGW__)
-        __nop();
-        __nop();
-        __nop();
-        __nop();
-        __nop();
-#endif
-
-       t = steady_clock::now();
-    }
-#endif // USE_BUSY_WAITING
-}
-
-void CTimer::interrupt()
-{
-   // schedule the sleepto time to the current CCs, so that it will stop
-   m_tsSchedTime = steady_clock::now();
-   tick();
-}
-
-void CTimer::tick()
-{
-    pthread_cond_signal(&m_TickCond);
-}
-
-
-void CTimer::triggerEvent()
-{
-    pthread_cond_signal(&m_EventCond);
-}
-
-CTimer::EWait CTimer::waitForEvent()
-{
-    timeval now;
-    timespec timeout;
-    gettimeofday(&now, 0);
-    if (now.tv_usec < 990000)
-    {
-        timeout.tv_sec = now.tv_sec;
-        timeout.tv_nsec = (now.tv_usec + 10000) * 1000;
-    }
-    else
-    {
-        timeout.tv_sec = now.tv_sec + 1;
-        timeout.tv_nsec = (now.tv_usec + 10000 - 1000000) * 1000;
-    }
-    pthread_mutex_lock(&m_EventLock);
-    int reason = pthread_cond_timedwait(&m_EventCond, &m_EventLock, &timeout);
-    pthread_mutex_unlock(&m_EventLock);
-
-    return reason == ETIMEDOUT ? WT_TIMEOUT : reason == 0 ? WT_EVENT : WT_ERROR;
-}
-
-void CTimer::sleep()
-{
-   #ifndef _WIN32
-      usleep(10);
-   #else
-      Sleep(1);
-   #endif
-}
-
-int CTimer::condTimedWaitUS(pthread_cond_t* cond, pthread_mutex_t* mutex, uint64_t delay) {
-    timeval now;
-    gettimeofday(&now, 0);
-    const uint64_t time_us = now.tv_sec * uint64_t(1000000) + now.tv_usec + delay;
-    timespec timeout;
-    timeout.tv_sec = time_us / 1000000;
-    timeout.tv_nsec = (time_us % 1000000) * 1000;
-
-    return pthread_cond_timedwait(cond, mutex, &timeout);
-}
-
-
-// Automatically lock in constructor
-CGuard::CGuard(pthread_mutex_t& lock, bool shouldwork):
-    m_Mutex(lock),
-    m_iLocked(-1)
-{
-    if (shouldwork)
-        m_iLocked = pthread_mutex_lock(&m_Mutex);
-}
-
-// Automatically unlock in destructor
-CGuard::~CGuard()
-{
-    if (m_iLocked == 0)
-        pthread_mutex_unlock(&m_Mutex);
-}
-
-// After calling this on a scoped lock wrapper (CGuard),
-// the mutex will be unlocked right now, and no longer
-// in destructor
-void CGuard::forceUnlock()
-{
-    if (m_iLocked == 0)
-    {
-        pthread_mutex_unlock(&m_Mutex);
-        m_iLocked = -1;
-    }
-}
-
-int CGuard::enterCS(pthread_mutex_t& lock)
-{
-    return pthread_mutex_lock(&lock);
-}
-
-int CGuard::leaveCS(pthread_mutex_t& lock)
-{
-    return pthread_mutex_unlock(&lock);
-}
-
-void CGuard::createMutex(pthread_mutex_t& lock)
-{
-    pthread_mutex_init(&lock, NULL);
-}
-
-void CGuard::releaseMutex(pthread_mutex_t& lock)
-{
-    pthread_mutex_destroy(&lock);
-}
-
-void CGuard::createCond(pthread_cond_t& cond)
-{
-    pthread_cond_init(&cond, NULL);
-}
-
-void CGuard::releaseCond(pthread_cond_t& cond)
-{
-    pthread_cond_destroy(&cond);
-}
-
-//
 CUDTException::CUDTException(CodeMajor major, CodeMinor minor, int err):
 m_iMajor(major),
 m_iMinor(minor)
 {
    if (err == -1)
-      #ifndef _WIN32
-         m_iErrno = errno;
-      #else
-         m_iErrno = GetLastError();
-      #endif
+       m_iErrno = NET_ERROR;
    else
       m_iErrno = err;
 }
 
 const char* CUDTException::getErrorMessage() const ATR_NOTHROW
+{
+    return getErrorString().c_str();
+}
+
+const string& CUDTException::getErrorString() const
 {
    // translate "Major:Minor" code into text message.
 
@@ -459,6 +242,9 @@ const char* CUDTException::getErrorMessage() const ATR_NOTHROW
            m_strMsg += ": Invalid epoll ID";
            break;
 
+        case MN_EEMPTY:
+           m_strMsg += ": All sockets removed from epoll, waiting would deadlock";
+
         default:
            break;
         }
@@ -508,7 +294,7 @@ const char* CUDTException::getErrorMessage() const ATR_NOTHROW
       m_strMsg += ": " + SysStrError(m_iErrno);
    }
 
-   return m_strMsg.c_str();
+   return m_strMsg;
 }
 
 #define UDT_XCODE(mj, mn) (int(mj)*1000)+int(mn)
@@ -562,33 +348,34 @@ bool CIPAddress::ipcmp(const sockaddr* addr1, const sockaddr* addr2, int ver)
    return false;
 }
 
-void CIPAddress::ntop(const sockaddr* addr, uint32_t ip[4], int ver)
+void CIPAddress::ntop(const sockaddr_any& addr, uint32_t ip[4])
 {
-   if (AF_INET == ver)
-   {
-      sockaddr_in* a = (sockaddr_in*)addr;
-      ip[0] = a->sin_addr.s_addr;
-   }
-   else
-   {
-      sockaddr_in6* a = (sockaddr_in6*)addr;
+    if (addr.family() == AF_INET)
+    {
+        ip[0] = addr.sin.sin_addr.s_addr;
+    }
+    else
+    {
+      const sockaddr_in6* a = &addr.sin6;
       ip[3] = (a->sin6_addr.s6_addr[15] << 24) + (a->sin6_addr.s6_addr[14] << 16) + (a->sin6_addr.s6_addr[13] << 8) + a->sin6_addr.s6_addr[12];
       ip[2] = (a->sin6_addr.s6_addr[11] << 24) + (a->sin6_addr.s6_addr[10] << 16) + (a->sin6_addr.s6_addr[9] << 8) + a->sin6_addr.s6_addr[8];
       ip[1] = (a->sin6_addr.s6_addr[7] << 24) + (a->sin6_addr.s6_addr[6] << 16) + (a->sin6_addr.s6_addr[5] << 8) + a->sin6_addr.s6_addr[4];
       ip[0] = (a->sin6_addr.s6_addr[3] << 24) + (a->sin6_addr.s6_addr[2] << 16) + (a->sin6_addr.s6_addr[1] << 8) + a->sin6_addr.s6_addr[0];
-   }
+    }
 }
 
-void CIPAddress::pton(sockaddr* addr, const uint32_t ip[4], int ver)
+// XXX This has void return and the first argument is passed by reference.
+// Consider simply returning sockaddr_any by value.
+void CIPAddress::pton(sockaddr_any& w_addr, const uint32_t ip[4], int ver)
 {
    if (AF_INET == ver)
    {
-      sockaddr_in* a = (sockaddr_in*)addr;
+      sockaddr_in* a = (&w_addr.sin);
       a->sin_addr.s_addr = ip[0];
    }
    else
    {
-      sockaddr_in6* a = (sockaddr_in6*)addr;
+      sockaddr_in6* a = (&w_addr.sin6);
       for (int i = 0; i < 4; ++ i)
       {
          a->sin6_addr.s6_addr[i * 4] = ip[i] & 0xFF;
@@ -687,7 +474,8 @@ std::string MessageTypeStr(UDTMessageType mt, uint32_t extt)
         "EXT:kmreq",
         "EXT:kmrsp",
         "EXT:sid",
-        "EXT:congctl"
+        "EXT:congctl",
+        "EXT:group"
     };
 
 
@@ -753,7 +541,8 @@ extern const char* const srt_rejectreason_msg [] = {
     "Password required or unexpected",
     "MessageAPI/StreamAPI collision",
     "Congestion controller type collision",
-    "Packet Filter type collision"
+    "Packet Filter type collision",
+    "Group settings collision"
 };
 
 const char* srt_rejectreason_str(SRT_REJECT_REASON rid)
@@ -771,22 +560,34 @@ const char* srt_rejectreason_str(SRT_REJECT_REASON rid)
 namespace srt_logging
 {
 
-std::string FormatTime(uint64_t time)
+
+std::string SockStatusStr(SRT_SOCKSTATUS s)
 {
-    using namespace std;
+    if (int(s) < int(SRTS_INIT) || int(s) > int(SRTS_NONEXIST))
+        return "???";
 
-    time_t sec = time/1000000;
-    time_t usec = time%1000000;
+    static struct AutoMap
+    {
+        // Values start from 1, so do -1 to avoid empty cell
+        std::string names[int(SRTS_NONEXIST)-1+1];
 
-    time_t tt = sec;
-    struct tm tm = SysLocalTime(tt);
+        AutoMap()
+        {
+#define SINI(statename) names[SRTS_##statename-1] = #statename
+            SINI(INIT);
+            SINI(OPENED);
+            SINI(LISTENING);
+            SINI(CONNECTING);
+            SINI(CONNECTED);
+            SINI(BROKEN);
+            SINI(CLOSING);
+            SINI(CLOSED);
+            SINI(NONEXIST);
+#undef SINI
+        }
+    } names;
 
-    char tmp_buf[512];
-    strftime(tmp_buf, 512, "%X.", &tm);
-
-    ostringstream out;
-    out << tmp_buf << setfill('0') << setw(6) << usec;
-    return out.str();
+    return names.names[int(s)-1];
 }
 
 LogDispatcher::Proxy::Proxy(LogDispatcher& guy) : that(guy), that_enabled(that.CheckEnabled())
